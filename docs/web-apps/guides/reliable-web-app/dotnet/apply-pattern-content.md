@@ -126,22 +126,25 @@ Secure your web app by enabling user authentication through your platform's feat
 
 Configure service authentication and authorization so the services in your environment have the permissions to perform necessary functions. Use [Managed Identities](/entra/identity/managed-identities-azure-resources/overview-for-developers) in Microsoft Entra ID to automate the creation and management of service identities, eliminating manual credential management. A managed identity allows your web app to securely access Azure services, like Azure Key Vault and databases. It also facilitates CI/CD pipeline integrations for deployments to Azure App Service. However, in scenarios like hybrid deployments or with legacy systems, continue using your on-premises authentication solutions to simplify migration. Transition to managed identities when your system is ready for a modern identity management approach. For more information, see [Monitoring managed identities](/entra/identity/managed-identities-azure-resources/how-to-view-managed-identity-activity).
 
-#### Use DefaultAzureCredential to set up code
+#### Use TokenCredential to set up code
 
-Use `DefaultAzureCredential` to provide credentials for local development and managed identities in the cloud. `DefaultAzureCredential` generates a `TokenCredential` for OAuth token acquisition. It handles most Azure SDK scenarios and Microsoft client libraries. It detects the application's environment to use the correct identity and requests access tokens as needed. `DefaultAzureCredential` streamlines authentication for Azure-deployed applications For more information, see [DefaultAzureCredential](/dotnet/api/azure.identity.defaultazurecredential?view=azure-dotnet).
+Use a [`TokenCredential`](/dotnet/api/azure.identity.tokencredential?view=azure-dotnet) to provide credentials for local development and managed identities in the cloud. `DefaultAzureCredential` is a common implementation of this that will try a number of strategies to retrieve a token. It detects the application's environment to use the correct identity and requests access tokens as needed. `DefaultAzureCredential` streamlines authentication for Azure-deployed applications. For more information, see [DefaultAzureCredential](/dotnet/api/azure.identity.defaultazurecredential?view=azure-dotnet).
 
-*Example:* The reference implementation uses the `DefaultAzureCredential` class during start up to enable the use of managed identity between the web API and Key Vault  (*see the following code*).
+*Example:* The reference implementation checks various configuration values for a specific credential to use or defaults to `DefaultAzureCredential` if none is specified. It is best to use a single instance of the `TokenCredential` throughout the code so the reference implementation passes it through the setup phase so all methods that need it can retrieve it (*see the following code*).
 
 ```csharp
+var azureCredential = builder.GetAzureTokenCredential();
+
 builder.Configuration.AddAzureAppConfiguration(options =>
 {
-     options
-        .Connect(new Uri(builder.Configuration["Api:AppConfig:Uri"]), new DefaultAzureCredential())
+    options
+        .Connect(new Uri(builder.Configuration["App:AppConfig:Uri"]), azureCredential)
+        .UseFeatureFlags() // Feature flags will be loaded and, by default, refreshed every 30 seconds
         .ConfigureKeyVault(kv =>
         {
-            // Some of the values coming from Azure App Configuration are stored Key Vault. Use
+            // Some of the values coming from Azure App Configuration are stored Key Vault, use
             // the managed identity of this host for the authentication.
-            kv.SetCredential(new DefaultAzureCredential());
+            kv.SetCredential(azureCredential);
         });
 });
 ```
@@ -335,17 +338,18 @@ Performance efficiency is the ability of your workload to scale to meet the dema
 
 The [Cache-Aside pattern](/azure/architecture/patterns/cache-aside) is a caching strategy that improves in-memory data management. The pattern assigns the application the responsibility of handling data requests and ensuring consistency between the cache and a persistent storage, such as a database. When the web app receives a data request, it first searches the cache. If the data is missing, it retrieves it from the database, responds to the request, and updates the cache accordingly. This approach shortens response times and enhances throughput and reduces the need for more scaling. It also bolsters service availability by reducing the load on the primary datastore and minimizing outage risks.
 
-*Example:* The reference implementation enhances application efficiency by caching critical data, such as information for upcoming concerts crucial for ticket sales. It uses ASP.NET Core's distributed memory cache for in-memory item storage. The application automatically uses Azure Cache for Redis when it finds a specific connection string. It also supports local development environments without Redis to simplify setup and reduce costs and complexity. The method (`AddAzureCacheForRedis`) configures the application to use Azure Cache for Redis (*see the following code*).
+*Example:* The reference implementation enhances application efficiency by caching critical data, such as information for upcoming concerts crucial for ticket sales. It uses ASP.NET Core's distributed memory cache for in-memory item storage. The application automatically uses Azure Cache for Redis when it finds a specific connection string. It also supports local development environments without Redis to simplify setup and reduce costs and complexity. The method (`AddAzureCacheForRedis`) configures the application to use Azure Cache for Redis (*see the following code*) with Managed Identity.
 
 ```csharp
-private void AddAzureCacheForRedis(IServiceCollection services)
-{
-    if (!string.IsNullOrWhiteSpace(Configuration["App:RedisCache:ConnectionString"]))
+private void AddAzureCacheForRedis(IServiceCollection services, TokenCredential credential)
     {
-        services.AddStackExchangeRedisCache(options =>
-        {
-            options.Configuration = Configuration["App:RedisCache:ConnectionString"];
-        });
+    var connectionString = Configuration["App:RedisCache:ConnectionString"];
+
+    if (!string.IsNullOrWhiteSpace(connectionString))
+    {
+        // If we have a connection string to Redis, use that as the distributed cache.
+        // If not, ASP.NET Core automatically injects an in-memory cache.
+        services.AddAzureStackExchangeRedisCache(connectionString, credential);
     }
     else
     {
